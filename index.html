@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Save Editor</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #fff; --text: #1d1d1b; --muted: #6b6a66; --line: #e2e0da;
+  --accent: #2f6f4f; --accent-text: #fff; --warn: #a3412b; --tip-bg: #1d1d1b; --tip-text: #f6f5f2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171716; --panel: #212120; --text: #ebe9e4; --muted: #9b9993; --line: #34332f;
+    --accent: #6fbf94; --accent-text: #10241a; --warn: #e38a73; --tip-bg: #ebe9e4; --tip-text: #171716;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+header .sp { flex: 1; }
+button, .btn { font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number], select { font: inherit; width: 110px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--text); }
+select { width: 175px; }
+td input[type=number] { width: 80px; }
+.hint { color: var(--muted); font-size: 12px; }
+.warn { color: var(--warn); }
+#drop { border: 2px dashed var(--line); border-radius: 10px; padding: 40px 16px; text-align: center; color: var(--muted); }
+#drop.over { border-color: var(--accent); }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+.tabs button { border-radius: 6px 6px 0 0; }
+.tabs button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.card.wide { grid-column: 1 / -1; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; }
+.row label { display: flex; align-items: center; gap: 6px; }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 12px; }
+.checks label { display: flex; gap: 6px; align-items: center; min-height: 26px; }
+.buttons { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 3px 6px; text-align: left; border-bottom: 1px solid var(--line); }
+th { font-weight: 500; color: var(--muted); font-size: 12px; }
+tr.cut td { color: var(--muted); }
+.q { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%;
+  border: 1px solid var(--muted); color: var(--muted); font-size: 10px; cursor: help; flex: none; }
+.q:hover::after, .q:focus::after { content: attr(data-tip); position: absolute; z-index: 9; left: 50%; bottom: 140%; transform: translateX(-50%);
+  width: max-content; max-width: 260px; padding: 6px 8px; border-radius: 6px; background: var(--tip-bg); color: var(--tip-text);
+  font-size: 12px; line-height: 1.35; white-space: normal; text-transform: none; letter-spacing: 0; font-weight: 400; }
+details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Save Editor</h1>
+    <span class="sp"></span>
+    <label class="btn">Open…<input id="file" type="file" hidden></label>
+    <button id="new">New file</button>
+    <button id="save" class="primary" disabled>Download</button>
+  </header>
+  <div id="drop">
+    Drop <b>SaveGames.mem</b> here, or use Open.<br>
+    <span class="hint">Original game: Documents\Activision\Madagascar\Save · Zoosters on macOS: ~/Library/Application Support/Activision/Madagascar/Save</span>
+  </div>
+  <div id="msg" class="warn"></div>
+  <div id="editor" hidden>
+    <div class="tabs" id="tabs"></div>
+    <div id="slot"></div>
+  </div>
+</main>
+
+<script id="format">
+// Format: 4 slots x 2100 bytes, each a 0x2c header + 2056 bytes of saved script variables. Details: wiki File formats.
+const SLOTS = 4, SLOT = 2100, HDR = 0x2c, DATA = 2056, FILE_SIZE = SLOTS * SLOT;
+const PLACEMENT_BYTES = 1500, PER_LEVEL = 800;
+
+// Order is fixed: the game matches each entry against its own variable list.
+const VARS = [
+  'effects volume::value', 'music volume::value', 'rumble disabled::value', 'Global Placement Removed::user',
+  'Next Level Auto Load::value', 'Game Running Time::value',
+  'ZoosterLives::user::value', 'ZoosterMoney::user::value', 'ZoosterMiniTotems::user::value', 'ZoosterHealthContainers::user::value',
+  'Current_Checkpoint_Index::user::value', 'last_level_played::user::value', 'furthest_level_unlocked::user::value',
+  'prompted_to_insert_memcard?::user::value', 'furthest_checkpoint_index::user::value', 'zoovenir_item_bits::user::value',
+  'Golf_Best_Score::user::value', 'shuffle_state_A::user::value', 'shuffle_state_b::user::value', 'rave_state_a::user::value',
+  'rave_state_b::user::value', 'new_level_just_unlocked?::user::value', 'total_money_collected::user::value',
+  'coins_escape::user::value', 'coins_street::user::value', 'coins_mutiny::user::value', 'coins_jungle::user::value',
+  'coins_lemurs::user::value', 'coins_kingofny::user::value', 'coins_coming::user::value', 'coins_beach::user::value',
+  'coins_rescue::user::value', 'coins_battle::user::value', 'rings_street::user::value', 'rings_lemurs::user::value',
+  'rings_banquet::user::value', 'high_score_armor::user::value', 'high_score_wobble::user::value', 'high_score_space::user::value',
+  'high_score_fruit::user::value', 'high_score_moles::user::value', 'high_score_simon::user::value', 'coins_banquet::user::value',
+  'Section01_LemurToss_Gathered::user::value', 'Section02_MartyJump_Gathered::user::value', 'Section03_MelmanGlide_Gathered::user::value',
+  'Section04_TurtleMinigame_Gathered::user::value', 'Section05_CrocBattle_Gathered::user::value',
+  'Section06_MushroomChain_Gathered ::user::value', // trailing space is the game's spelling
+  'Section07_BirdWhack_Gathered::user::value', 'Section08_CrabSmash_Gathered::user::value', 'Section09_BoulderRun_Gathered::user::value',
+  'Section01_WhackMole_Gathered::user::value', 'Section02_CaveOnion_Gathered::user::value', 'Section06_Smoothie_Gathered::user::value',
+  'Section08_KelpSalad_Gathered::user::value', 'Section04_Simon_Gathered::user::value', 'Section09_Melon_Gathered::user::value',
+  'Section10_Race_Gathered::user::value', 'Section07_RoyalJelly_Gathered::user::value', 'Section03_Pineapple_Gathered::user::value',
+  'Section10_Jump_Gathered::user::value', 'Section05_Waterslide_Gathered::user::value', 'rings_jungle::user::value',
+  'acquired_hipslide?::user::value', 'acquired_headbash?::user::value', 'acquired_long_jump?::user::value',
+  'go_to_zoovenir::user::value', 'zoovenir_disable_bits::user::value', 'destruction_street::user::value',
+];
+const V = Object.fromEntries(VARS.map((n, i) => [n.split('::')[0].trim(), i]));
+const PLACEMENT = 3, RUN_TIME = 5;
+
+const STREAMS = ['kingofny', 'escape', 'street', 'mutiny', 'jungle', 'rave', 'lemurs', 'banquet', 'coming', 'beach',
+  'rescue', 'battle', 'shuffle', 'golf', 'map', 'title'];
+
+const CRC = Array.from({ length: 256 }, (_, i) => {
+  let c = i;
+  for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xEDB88320 : c >>> 1;
+  return c >>> 0;
+});
+// CRC-32 of the lower-cased name, without the final inversion.
+function nameHash(s) {
+  let c = 0xFFFFFFFF;
+  for (const ch of s.toLowerCase()) c = (CRC[(c ^ ch.charCodeAt(0)) & 0xFF] ^ (c >>> 8)) >>> 0;
+  return c;
+}
+const KEYS = VARS.map(nameHash);
+
+const entryOff = j => j < 3 ? j * 8 : j === 3 ? 0x18 : 0x5f8 + (j - 4) * 8;
+
+class SaveFile {
+  constructor(bytes) {
+    this.b = bytes || new Uint8Array(FILE_SIZE);
+    this.dv = new DataView(this.b.buffer, this.b.byteOffset, this.b.byteLength);
+    if (!bytes) for (let s = 0; s < SLOTS; s++) this.clear(s);
+  }
+  base(s) { return s * SLOT; }
+  data(s) { return s * SLOT + HDR; }
+  hdr(s, off) { return this.dv.getUint32(this.base(s) + off, true); }
+  setHdr(s, off, v) { this.dv.setUint32(this.base(s) + off, v >>> 0, true); }
+  used(s) { return this.hdr(s, 4) === 8 && this.hdr(s, 0) === DATA; }
+  levelName(s) {
+    const o = this.base(s) + 0x1c;
+    return String.fromCharCode(...this.b.subarray(o, o + 12)).replace(/\0.*$/s, '');
+  }
+  // Ints are stored with the top bit set; the game reads a clear top bit as a float.
+  int(s, j) { return this.dv.getUint32(this.data(s) + entryOff(j) + 4, true) & 0x7fffffff; }
+  setInt(s, j, v) { this.dv.setUint32(this.data(s) + entryOff(j) + 4, ((Math.max(0, Math.min(v | 0, 0x7fffffff))) | 0x80000000) >>> 0, true); }
+  float(s, j) { return this.dv.getFloat32(this.data(s) + entryOff(j) + 4, true); }
+  setFloat(s, j, v) { this.dv.setFloat32(this.data(s) + entryOff(j) + 4, Math.max(0, v), true); }
+  placed(s, i) { return (this.b[this.data(s) + 0x1c + (i >> 3)] >> (i & 7)) & 1; }
+  setPlaced(s, i, on) {
+    const o = this.data(s) + 0x1c + (i >> 3);
+    this.b[o] = on ? this.b[o] | (1 << (i & 7)) : this.b[o] & ~(1 << (i & 7));
+  }
+  badKeys(s) {
+    return KEYS.flatMap((k, j) => this.dv.getUint32(this.data(s) + entryOff(j), true) === k ? [] : [j]);
+  }
+  checksum(s) {
+    let h = 0x55555555;
+    const d = this.data(s);
+    for (let i = 0; i < DATA; i++) {
+      h = (h ^ ((this.b[d + i] << 24) >> 24)) >>> 0;
+      h = ((h << 1) | (h >>> 31)) >>> 0;
+    }
+    return h;
+  }
+  checksumOk(s) { return this.hdr(s, 0x18) === this.checksum(s); }
+  // Same bytes the game writes for an empty slot.
+  clear(s) {
+    this.b.fill(0, this.base(s), this.base(s) + SLOT);
+    this.setHdr(s, 0x18, 0x55555555);
+  }
+  // What the title's New Game writes into slot 0.
+  newGame(s) {
+    this.b.fill(0, this.base(s), this.base(s) + SLOT);
+    KEYS.forEach((k, j) => {
+      this.dv.setUint32(this.data(s) + entryOff(j), k, true);
+      if (j !== PLACEMENT && j !== RUN_TIME) this.setInt(s, j, 0);
+    });
+    this.setInt(s, V['effects volume'], 75);
+    this.setInt(s, V['music volume'], 75);
+    this.setInt(s, V['Next Level Auto Load'], 16);
+    this.setInt(s, V['ZoosterLives'], 5);
+    this.setInt(s, V['ZoosterHealthContainers'], 4);
+    this.setHdr(s, 0, DATA);
+    this.setHdr(s, 4, 8);
+    this.setHdr(s, 8, VARS.length);
+    this.finish(s);
+  }
+  copy(from, to) { this.b.copyWithin(this.base(to), this.base(from), this.base(from) + SLOT); }
+  // Header fields the game derives on save: level name, checksum. The pointer at +0x28 is never read back.
+  finish(s) {
+    if (this.used(s)) {
+      const lvl = this.int(s, V['Next Level Auto Load']);
+      const name = ((STREAMS[lvl] || 'kingofny') + '.stream').slice(0, 11);
+      const o = this.base(s) + 0x1c;
+      this.b.fill(0, o, o + 12);
+      for (let i = 0; i < name.length; i++) this.b[o + i] = name.charCodeAt(i);
+      this.setHdr(s, 0x28, 0);
+      // The save script packs these into the "percent" field; the load menu decodes them.
+      this.setHdr(s, 0x10, this.int(s, V.furthest_level_unlocked) * 2048 + this.int(s, V.total_money_collected));
+    }
+    this.setHdr(s, 0x18, this.checksum(s));
+  }
+}
+if (typeof module !== 'undefined') module.exports = { SaveFile, V, VARS, nameHash, FILE_SIZE, PER_LEVEL, PLACEMENT_BYTES };
+</script>
+
+<script>
+const LEVELS = ['King of New York', "Marty's Escape", 'N.Y. Street Chase', 'Penguin Mutiny', 'Mysterious Jungle', 'Lemur Rave',
+  'Save the Lemurs', 'Jungle Banquet', 'Coming of Age', 'Back to the Beach', 'Marty to the Rescue', 'Final Battle', 'Shuffleboard',
+  'Tiki Minigolf', 'Map', 'Title', 'New game (intro video)'];
+
+// Current_Checkpoint_Index per level: [value, label]. Levels not listed only use 0.
+const CHECKPOINTS = {
+  0: ['Start (Marty)', "Marty's kick learned", "Alex's section", "Alex's act done", 'Gloria wins the race', 'Penguin fishing done'],
+  1: ['Start by the elephant', 'Crawl learned', 'Got ostrich key', 'Ostrich zone', 'Bird zone', 'Got monkey key', 'Monkey zone',
+    'Got bear key', 'Bear zone', 'End zone', 'Got zoo exit key'],
+  2: ["Alex's section", "Gloria's section", "Gloria's stones done", "Melman's section", "Melman's stones done"],
+  3: ['Start', 'First pipe open', 'Flag 2', 'Crane deck secured', 'Gas room', 'Radio room captured', 'Bowling on deck done',
+    'Poop deck secured', 'Mess hall stormed'],
+  4: ['Start', 'Pearl area', 'Overlooking the falls', 'Top of the falls', 'Path through the spitters', 'Mushroom game', 'Swamp start',
+    'Swamp 1/3', 'Swamp 2/3'],
+  6: ['Start', 'Cave ascent', 'Windy cave 1', 'Windy cave 2', 'Seaside resort', 'Lemur escort (Alex)'],
+  8: ['Start', 'Durian bombing (Melman)', 'Mole mashing (Gloria)', 'Crazy Alex (Melman)'],
+  10: [[0, 'Start'], [1, 'Level start'], [3, 'Fruit game'], [4, 'First slide'], [5, 'Spider pit'], [7, 'Croc slide']],
+  11: ['Arena part 1', 'Arena part 2', 'Boss fight, pedestal', 'Boss fight, throne'],
+};
+const checkpoints = lvl => (CHECKPOINTS[lvl] || ['Start']).map((c, i) => Array.isArray(c) ? c : [i, c]);
+
+// Load menu: name and base percent by furthest level, plus up to 20% for coins.
+const MENU_NAMES = ['King of New York', "Marty's Escape", 'N.Y. Street Chase', 'Penguin Mutiny', 'Mysterious Jungle', 'Mysterious Jungle',
+  'Save The Lemurs', 'Jungle Banquet', 'Coming of Age', 'Back to the Beach', 'Marty to the Rescue', 'Final Battle', 'Defeated Foosa Boss!'];
+const MENU_BASE = [0, 7, 15, 22, 29, 29, 36, 44, 51, 58, 65, 73, 80];
+const COIN_STEPS = [0, 58, 116, 174, 232, 289, 347, 405, 463, 521, 579, 637, 695, 753, 811, 868, 926, 984, 1042];
+const GOLFERS = ['Alex', 'Gloria', 'Julian', 'Marty', 'Maurice', 'Melman'];
+const hms = t => `${t / 3600 | 0}:${String((t / 60 | 0) % 60).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+
+const SHOP = [
+  [0, 'Alex: crown', 20], [1, 'Alex: finger', 30], [2, 'Gloria: bikini', 20], [3, 'Gloria: flowers', 30],
+  [4, 'Marty: hat', 20], [5, 'Marty: glasses', 30], [6, 'Melman: clock', 20, 'Clock and shoeboxes may be the other way round.'],
+  [7, 'Melman: shoeboxes', 30], [8, 'Coin magnet', 175], [9, '2x life tikis', 80], [10, 'Flaming footprints', 50],
+  [11, 'Tiki Golf', 35, 'Unlocks the level on the map.'], [12, 'Lemur Rave', 35, 'Unlocks the level on the map.'],
+  [13, 'Shuffleboard', 35, 'Unlocks the level on the map.'],
+  [14, 'Echo chamber', 0, 'Cut from the game; does nothing.'],
+  [15, 'Tranquilized', 0, 'Cut from the game; does nothing.'],
+  [16, 'Golf: 3 players', 20], [17, 'Golf: 4 players', 20], [18, 'Golf: 5 players', 20], [19, 'Golf: 6 players', 20],
+  [20, 'Golf: crazy ball', 0, 'Cut from the game; does nothing.'],
+  [21, 'Rave: 2 players', 20], [22, 'Rave song: Softcore Surge', 20], [23, 'Rave song: Salvarsan', 20], [24, 'Rave song: Mirando de Lado', 20],
+  [25, 'Shuffle: Wilbur', 10], [26, 'Shuffle: Crocky', 10], [27, 'Shuffle: King Foosa', 10], [28, 'Shuffle: Big Louie', 10],
+  [29, 'Shuffle: jungle board', 20], [30, 'Shuffle: ice board', 20],
+];
+const ALL_ITEMS = 0x7FEF3FFF;
+
+const COINS = [[0, 'kingofny'], [1, 'escape'], [2, 'street'], [3, 'mutiny'], [4, 'jungle'], [6, 'lemurs'], [7, 'banquet'], [8, 'coming'],
+  [9, 'beach'], [10, 'rescue'], [11, 'battle']];
+const RINGS = ['street', 'lemurs', 'banquet', 'jungle'];
+
+const STATUE = ['LemurToss', 'MartyJump', 'MelmanGlide', 'TurtleMinigame', 'CrocBattle', 'MushroomChain', 'BirdWhack', 'CrabSmash', 'BoulderRun', 'Race'];
+const DISHES = ['WhackMole', 'CaveOnion', 'Pineapple', 'Simon', 'Waterslide', 'Smoothie', 'RoyalJelly', 'KelpSalad', 'Melon', 'Jump'];
+const sectionVar = name => VARS.findIndex(v => v.split('::')[0].trim().endsWith('_' + name + '_Gathered'));
+const words = s => s.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/^./, c => c.toUpperCase());
+
+let save = null, cur = 0, dirty = false;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const tip = t => t ? ` <span class="q" tabindex="0" data-tip="${esc(t)}">?</span>` : '';
+
+function levelSelect(j, max) {
+  const v = save.int(cur, j);
+  const opts = LEVELS.slice(0, max + 1).map((n, i) => `<option value="${i}"${i === v ? ' selected' : ''}>${i} · ${n}</option>`);
+  if (v > max) opts.push(`<option value="${v}" selected>${v}</option>`);
+  return `<select data-e="${j}">${opts.join('')}</select>`;
+}
+function cpSelect(j, lvl) {
+  const v = save.int(cur, j), cps = checkpoints(lvl);
+  const opts = cps.map(([n, label]) => `<option value="${n}"${n === v ? ' selected' : ''}>${n} · ${label}</option>`);
+  if (!cps.some(([n]) => n === v)) opts.push(`<option value="${v}" selected>${v}</option>`);
+  return `<select data-e="${j}">${opts.join('')}</select>`;
+}
+const num = (j, max = 2147483647) => `<input type="number" min="0" max="${max}" data-e="${j}" value="${save.int(cur, j)}">`;
+const check = (j, label, t, invert) =>
+  `<label><input type="checkbox" data-e="${j}"${invert ? ' data-invert' : ''}${!!save.int(cur, j) !== !!invert ? ' checked' : ''}>${label}${tip(t)}</label>`;
+const row = (label, t, input) => `<div class="row"><label>${label}${tip(t)}</label>${input}</div>`;
+const card = (title, body, t, wide) => `<section class="card${wide ? ' wide' : ''}"><h2>${title}${tip(t)}</h2>${body}</section>`;
+
+function renderTabs() {
+  $('tabs').innerHTML = [0, 1, 2, 3].map(s => {
+    let label = `Slot ${s + 1} · `;
+    if (!save.used(s)) label += 'empty';
+    else {
+      const lvl = save.int(s, V['Next Level Auto Load']);
+      label += LEVELS[lvl] || 'level ' + lvl;
+      if (!save.checksumOk(s)) label += ' · damaged';
+    }
+    return `<button data-slot="${s}" class="${s === cur ? 'on' : ''}">${esc(label)}</button>`;
+  }).join('');
+}
+
+function renderSlot() {
+  const s = cur;
+  if (!save.used(s)) {
+    const others = [0, 1, 2, 3].filter(o => o !== s && save.used(o));
+    $('slot').innerHTML = card('Empty slot', `<div class="buttons"><button data-act="newgame">Start as new game</button>` +
+      others.map(o => `<button data-act="copy" data-from="${o}">Copy slot ${o + 1}</button>`).join('') + '</div>', '', true);
+    return;
+  }
+  const bad = save.badKeys(s);
+  const warning = bad.length ? `<p class="warn">${bad.length} entries don't match the retail game's layout. Editing this slot may break it.</p>` : '';
+  const items = save.int(s, V.zoovenir_item_bits), off = save.int(s, V.zoovenir_disable_bits);
+
+  const progress = card('Progress',
+    row('Starts in', '', levelSelect(V['Next Level Auto Load'], 16)) +
+    row('Checkpoint', '', cpSelect(V.Current_Checkpoint_Index, save.int(s, V['Next Level Auto Load']))) +
+    row('Furthest level', '', levelSelect(V.furthest_level_unlocked, 14)) +
+    row('Furthest checkpoint', 'Where the map resumes the furthest level.', cpSelect(V.furthest_checkpoint_index, save.int(s, V.furthest_level_unlocked))) +
+    row('Last level played', '', levelSelect(V.last_level_played, 16)) +
+    `<div class="buttons"><button data-act="unlock">Unlock all levels</button></div>`);
+
+  const player = card('Player',
+    row('Lives', '', num(V.ZoosterLives)) + row('Coins', '', num(V.ZoosterMoney)) +
+    row('Mini totems', '', num(V.ZoosterMiniTotems)) + row('Health containers', '', num(V.ZoosterHealthContainers)) +
+    row('Coins collected, all time', '', num(V.total_money_collected)) +
+    '<div class="checks">' + check(V['acquired_hipslide?'], 'Hip slide') + check(V['acquired_headbash?'], 'Head bash') +
+    check(V['acquired_long_jump?'], 'Long jump') + '</div>');
+
+  const settings = card('Settings',
+    row('Effects volume', 'The in-game slider won\'t show an edited value.', num(V['effects volume'], 100)) +
+    row('Music volume', '', num(V['music volume'], 100)) +
+    '<div class="checks">' + check(V['rumble disabled'], 'Vibration', '', true) + '</div>');
+
+  const shop = card('Zoovenir shop',
+    '<table><tr><th>Item</th><th>Price</th><th>Owned</th><th>Off' + tip('Owned, but switched off in the shop.') + '</th></tr>' +
+    SHOP.map(([bit, name, price, t]) => `<tr class="${price ? '' : 'cut'}"><td>${name}${tip(t)}</td><td>${price || '–'}</td>` +
+      `<td><input type="checkbox" data-bit="${bit}" data-e="${V.zoovenir_item_bits}"${items >> bit & 1 ? ' checked' : ''}></td>` +
+      `<td>${bit <= 10 ? `<input type="checkbox" data-bit="${bit}" data-e="${V.zoovenir_disable_bits}"${off >> bit & 1 ? ' checked' : ''}>` : ''}</td></tr>`).join('') +
+    '</table><div class="buttons"><button data-act="allitems">All items</button><button data-act="noitems">None</button></div>');
+
+  const coins = card('Level records',
+    '<table><tr><th>Level</th><th>Coins</th><th>Rings</th></tr>' +
+    COINS.map(([l, k]) => `<tr><td>${LEVELS[l]}</td><td>${num(V['coins_' + k])}</td><td>${RINGS.includes(k) ? num(V['rings_' + k]) : ''}</td></tr>`).join('') +
+    '</table>');
+
+  const golf = save.int(s, V.Golf_Best_Score), rave = save.int(s, V.rave_state_a);
+  const scores = card('Minigame high scores',
+    [['armor', 'Armor', 'King of New York'], ['space', 'Space', "Marty's Escape"], ['wobble', 'Wobble Bird', 'N.Y. Street Chase'],
+      ['simon', 'Mushroom', 'Jungle Banquet'], ['moles', 'Moles', 'Coming of Age'], ['fruit', 'Fruit', 'Marty to the Rescue']]
+      .map(([k, n, l]) => row(`${n} <span class="hint">${l}</span>`, '', num(V['high_score_' + k]))).join('') +
+    row('Lemur Rave', '', num(V.rave_state_b)) +
+    row('Lemur Rave song', '', `<select data-e="${V.rave_state_a}">` +
+      [0, 1, 2, 3, 4, 5].map(n => `<option value="${n}"${n === rave ? ' selected' : ''}>${n ? 'Song ' + n : 'none'}</option>`).join('') + '</select>') +
+    row('Tiki Minigolf strokes', 'Fewest strokes; 0 = no record.', `<input type="number" min="0" max="255" data-golf="strokes" value="${golf & 255}">`) +
+    row('Tiki Minigolf golfer', '', `<select data-golf="who">` +
+      GOLFERS.map((n, i) => `<option value="${i}"${i === golf >> 8 ? ' selected' : ''}>${n}</option>`).join('') + '</select>'));
+
+  const collect = card('Collectibles',
+    '<h2>Statue pieces · Back to the Beach</h2><div class="checks">' + STATUE.map(n => check(sectionVar(n), words(n))).join('') + '</div>' +
+    '<h2 style="margin-top:12px">Dishes · Jungle Banquet</h2><div class="checks">' + DISHES.map(n => check(sectionVar(n), words(n))).join('') + '</div>' +
+    '<div class="checks" style="margin-top:12px">' + check(V.destruction_street, 'Street: 30 cars smashed') + '</div>',
+    '', true);
+
+  const objects = card('Collected and destroyed objects',
+    '<table><tr><th>Level</th><th>Objects</th><th></th></tr>' + LEVELS.slice(0, 15).map((n, l) => {
+      let c = 0;
+      for (let i = l * PER_LEVEL; i < (l + 1) * PER_LEVEL; i++) c += save.placed(s, i);
+      return `<tr><td>${n}</td><td>${c}</td><td><button data-act="respawn" data-level="${l}"${c ? '' : ' disabled'}>Respawn</button></td></tr>`;
+    }).join('') + '</table>',
+    'Coins, crates and pickups that are gone. Respawn brings a level\'s back.', true);
+
+  const furthest = save.int(s, V.furthest_level_unlocked), money = save.int(s, V.total_money_collected), time = save.hdr(s, 20);
+  const pct = furthest < MENU_BASE.length
+    ? Math.min(100, MENU_BASE[furthest] + (money >= 1100 ? 20 : COIN_STEPS.filter(t => money > t).length)) + '%' : '';
+  const menu = card('Load menu',
+    `<p><b>${s + 1}. ${esc(MENU_NAMES[furthest] || '(no name)')}</b> &nbsp; ${pct} &nbsp; ${hms(time)}</p>` +
+    row('Play time, seconds', '', `<input type="number" min="0" data-h="20" value="${time}">`),
+    'Named after the furthest level, not where the slot starts. Percent comes from the furthest level and all-time coins.');
+
+  const other = `<section class="card wide"><details><summary>Other values</summary>` +
+    row('Running time, seconds', '', `<input type="number" min="0" step="0.01" data-f="${V['Game Running Time']}" value="${save.float(s, V['Game Running Time']).toFixed(2)}">`) +
+    '<div class="checks">' + check(V['new_level_just_unlocked?'], '"New level unlocked" on the map') +
+    check(V.go_to_zoovenir, 'Map opens the Zoovenir shop') + '</div>' +
+    ['shuffle_state_A', 'shuffle_state_b'].map(k => row(k, 'Shuffleboard test preset; unused.', num(V[k]))).join('') +
+    `<div class="buttons"><button data-act="clear">Delete slot</button></div></details></section>`;
+
+  $('slot').innerHTML = warning + '<div class="grid">' + menu + progress + player + settings + shop + coins + scores + collect + objects + other + '</div>';
+}
+
+function render() { renderTabs(); renderSlot(); $('save').disabled = false; }
+function touch() { save.finish(cur); dirty = true; renderTabs(); }
+
+function load(bytes, name) {
+  if (bytes.length !== FILE_SIZE) { $('msg').textContent = `${name} is ${bytes.length} bytes; a save file is ${FILE_SIZE}.`; return; }
+  save = new SaveFile(bytes); cur = Math.max(0, [0, 1, 2, 3].find(s => save.used(s)) ?? 0); dirty = false;
+  $('msg').textContent = '';
+  $('drop').hidden = true; $('editor').hidden = false;
+  render();
+}
+
+$('file').onchange = async e => { const f = e.target.files[0]; if (f) load(new Uint8Array(await f.arrayBuffer()), f.name); e.target.value = ''; };
+$('new').onclick = () => { if (dirty && !confirm('Discard changes?')) return; save = new SaveFile(); save.newGame(0); cur = 0; dirty = true;
+  $('drop').hidden = true; $('editor').hidden = false; render(); };
+$('save').onclick = () => {
+  for (let s = 0; s < 4; s++) save.finish(s);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([save.b], { type: 'application/octet-stream' }));
+  a.download = 'SaveGames.mem'; a.click(); URL.revokeObjectURL(a.href);
+  dirty = false; render();
+};
+window.onbeforeunload = e => { if (dirty) e.preventDefault(); };
+document.addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
+document.addEventListener('dragleave', () => $('drop').classList.remove('over'));
+document.addEventListener('drop', async e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+  const f = e.dataTransfer.files[0]; if (f) load(new Uint8Array(await f.arrayBuffer()), f.name);
+});
+
+$('tabs').onclick = e => { const b = e.target.closest('button'); if (b) { cur = +b.dataset.slot; render(); } };
+
+$('slot').addEventListener('change', e => {
+  const el = e.target, s = cur;
+  if (el.dataset.golf) {
+    const g = save.int(s, V.Golf_Best_Score);
+    save.setInt(s, V.Golf_Best_Score, el.dataset.golf === 'who' ? (+el.value << 8) | (g & 255) : (g & ~255) | Math.min(255, Math.max(0, +el.value | 0)));
+  } else if (el.dataset.h) save.setHdr(s, +el.dataset.h, Math.max(0, +el.value | 0));
+  else if (el.dataset.f) save.setFloat(s, +el.dataset.f, +el.value || 0);
+  else if (el.dataset.e) {
+    const j = +el.dataset.e;
+    if (el.dataset.bit) {
+      const bit = 1 << +el.dataset.bit;
+      save.setInt(s, j, el.checked ? save.int(s, j) | bit : save.int(s, j) & ~bit);
+    } else if (el.type === 'checkbox') save.setInt(s, j, el.checked !== ('invert' in el.dataset) ? 1 : 0);
+    else save.setInt(s, j, +el.value);
+  }
+  // Checkpoint lists and the load-menu preview depend on these.
+  if (el.dataset.h || [V['Next Level Auto Load'], V.furthest_level_unlocked, V.total_money_collected].includes(+el.dataset.e)) renderSlot();
+  touch();
+});
+
+$('slot').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const s = cur;
+  switch (b.dataset.act) {
+    case 'newgame': save.newGame(s); break;
+    case 'copy': save.copy(+b.dataset.from, s); break;
+    case 'clear': if (!confirm(`Delete slot ${s + 1}?`)) return; save.clear(s); break;
+    case 'unlock':
+      save.setInt(s, V.furthest_level_unlocked, 12); save.setInt(s, V['Next Level Auto Load'], 14);
+      save.setInt(s, V.Current_Checkpoint_Index, 0); break;
+    case 'allitems': save.setInt(s, V.zoovenir_item_bits, ALL_ITEMS); break;
+    case 'noitems': save.setInt(s, V.zoovenir_item_bits, 0); save.setInt(s, V.zoovenir_disable_bits, 0); break;
+    case 'respawn':
+      for (let i = +b.dataset.level * PER_LEVEL; i < (+b.dataset.level + 1) * PER_LEVEL; i++) save.setPlaced(s, i, 0);
+      break;
+  }
+  save.finish(s); dirty = true; render();
+});
+</script>
+</body>
+</html>
